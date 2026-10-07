@@ -28,6 +28,7 @@ from app.models.schema import (
     ComponentResult,
 )
 from app.services.snapshots import apply_optimistic_update, create_immutable_snapshot, ensure_single_generation
+from app.services.diff import build_draft_diff
 from app.workers.tasks import build_pipeline
 
 router = APIRouter(prefix="/api")
@@ -160,6 +161,17 @@ def submit_job(project_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/projects/{project_id}/draft-diff")
+def draft_diff(project_id: int, snapshot_id: int | None = None, db: Session = Depends(get_db)):
+    """Review input differences between the current draft and a snapshot.
+
+    Read-only by construction: no snapshot is created, no Job is queued and no
+    lock_version moves. Pass ``snapshot_id`` to compare against an older
+    immutable snapshot; defaults to the latest snapshot of the project.
+    """
+    return build_draft_diff(db, project_id, snapshot_id)
+
+
 @router.post("/jobs/{job_id}/resume", status_code=202)
 def resume_job(job_id: int, db: Session = Depends(get_db)):
     job = _get(db, Job, job_id)
@@ -174,7 +186,14 @@ def resume_job(job_id: int, db: Session = Depends(get_db)):
 @router.get("/projects/{project_id}/topology")
 def topology(project_id: int, db: Session = Depends(get_db)):
     points = db.scalars(select(Point).where(Point.project_id == project_id).order_by(Point.id)).all()
-    obs = db.scalars(select(Observation).where(Observation.project_id == project_id).order_by(Observation.id)).all()
+    # The working graph mirrors the draft snapshot inputs: only active segments
+    # are drawn. Segments removed from the draft are overlaid as review ghosts
+    # by the draft-diff endpoint rather than staying in the base graph.
+    obs = db.scalars(
+        select(Observation)
+        .where(Observation.project_id == project_id, Observation.active.is_(True))
+        .order_by(Observation.id)
+    ).all()
     point_index = {p.id: p.code for p in points}
     return {
         "nodes": [{"data": {"id": p.code, "label": p.code, "point_id": p.id}} for p in points],
@@ -182,6 +201,7 @@ def topology(project_id: int, db: Session = Depends(get_db)):
             {
                 "data": {
                     "id": o.line_code,
+                    "obs_id": o.id,
                     "source": point_index[o.from_point_id],
                     "target": point_index[o.to_point_id],
                     "label": f"{float(o.observed_delta_m):.3f}",

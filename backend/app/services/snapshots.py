@@ -151,7 +151,19 @@ def _serialize_project_state(project_id: int, db: Session) -> dict[str, Any]:
         ),
         "payload_sha256": payload_hash,
     }
-    return {"payload": payload, "observations_hash": observations_hash, "rules_hash": rules_hash, "summary": summary}
+    versions = {
+        "point": {int(p.id): int(p.lock_version) for p in points},
+        "observation": {int(o.id): int(o.lock_version) for o in observations},
+        "datum": {int(d.id): int(d.lock_version) for d in datums},
+        "weight_rule": {int(r.id): int(r.lock_version) for r in rules},
+    }
+    return {
+        "payload": payload,
+        "observations_hash": observations_hash,
+        "rules_hash": rules_hash,
+        "summary": summary,
+        "versions": versions,
+    }
 
 
 def create_immutable_snapshot(db: Session, project_id: int) -> Snapshot:
@@ -192,6 +204,7 @@ def create_immutable_snapshot(db: Session, project_id: int) -> Snapshot:
         rules_sha256=state["rules_hash"],
         input_summary=state["summary"],
         payload=state["payload"],
+        input_versions=state["versions"],
         algorithm=algorithm,
         immutable=True,
     )

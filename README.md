@@ -108,7 +108,23 @@ curl -X POST http://localhost:8000/api/jobs/1/resume
 # 仅当前快照、全部检查通过才发布
 curl -X POST http://localhost:8000/api/jobs/1/publish \
   -H 'Content-Type: application/json' -d '{"confirm":true}'
+
+# 提交前只读复核：当前草稿 vs 上一份快照的输入差异（不生成 Job、不建新快照、不推进锁版本）
+curl 'http://localhost:8000/api/projects/1/draft-diff'
+# 也可指定更早的不可变快照作为基线
+curl 'http://localhost:8000/api/projects/1/draft-diff?snapshot_id=12'
 ```
+
+`draft-diff` 是纯查询接口：
+
+- **稳定 ID 匹配**：测点/测段/基准/权重规则按主键 `id` 配对，绝不按 `code`/`line_code` 误配。删除后新建且复用同名代码的对象会显示为“一删一增”，而不是“修改”。
+- **逐项列出新增/删除/修改与版本号**：每条变化给出 `base_lock_version` 与 `draft_lock_version`，观测高差、长度、基准高程/中误差逐字段给出 `before/after`。
+- **版本号不污染哈希**：快照版本号独立存放在 `snapshots.input_versions`，不进入 `payload`/SHA-256；仅乐观锁版本递增而输入不变时仍命中快照去重（不变量 #3）。
+- **拓扑复核**：返回新增/删除节点、新增/删除测段，以及被删除后导致连通分量分裂的“桥接测段”（`bridging_removed`）；前端在 Cytoscape 图上以绿/橙/红色虚线高亮，并为已删除对象注入幽灵节点/边。
+- **新草稿输入摘要**：返回草稿点/测段/基准/规则计数、观测总长度与输入哈希，并标记 `matches_base_snapshot` 与 `weight_only`。
+- **只读保证**：接口不 `commit`、不 `add` 任何行，结尾显式 `rollback`；连续查看不会推进草稿锁版本，也不会创建或改变已完成 Job。
+- **只调权重**：当唯一变化是权重规则 `rule` 体或测段 `weight_override` 时，`weight_only=true` 且 `topology.topology_changed=false`；测点、基准、高差、长度均不出现在差异中。
+- 尚不存在任何快照时返回 `409 no_snapshot`，复核不会代为创建第一份快照。
 
 ## 十万测段压力验收
 
@@ -150,6 +166,7 @@ cd backend && pytest -q
 | Worker 重启 | stage `confirmed_at` 作为恢复点；orchestrator 跳过已确认阶段 |
 | 重复提交 | `uq_job_generation` 保证项目+快照只有一个 Job 代次 |
 | 发布 | 核对闭合环、基准约束、改正数/残差统计、快照哈希、算法参数和 `regularization=none` |
+| 提交前差异复核 | `GET /draft-diff` 按稳定 ID 列出测点/基准/高差/长度/权重规则的增删改与版本号；拓扑图高亮桥接删除；只读，不生成 Job、不改旧快照、不推进锁版本；只调权重时仅显示规则变化 |
 
 ## 目录
 
