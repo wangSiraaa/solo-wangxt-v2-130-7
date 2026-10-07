@@ -95,12 +95,16 @@ def _serialize_project_state(project_id: int, db: Session) -> dict[str, Any]:
         select(WeightRule).where(WeightRule.project_id == project_id, WeightRule.active.is_(True)).order_by(WeightRule.id)
     ).all()
 
+    # lock_version rides along purely for snapshot-vs-draft review display; it
+    # is stripped before hashing so input hashes track measured inputs/rules,
+    # not optimistic-lock bookkeeping (dedup semantics stay unchanged).
     payload = {
         "points": [
             {
                 "id": p.id,
                 "code": p.code,
                 "name": p.name,
+                "lock_version": p.lock_version,
             }
             for p in points
         ],
@@ -116,6 +120,7 @@ def _serialize_project_state(project_id: int, db: Session) -> dict[str, Any]:
                 "direction": o.direction,
                 "pair_group": o.pair_group,
                 "weight_override": None if o.weight_override is None else float(o.weight_override),
+                "lock_version": o.lock_version,
             }
             for o in observations
         ],
@@ -125,6 +130,7 @@ def _serialize_project_state(project_id: int, db: Session) -> dict[str, Any]:
                 "point_id": d.point_id,
                 "elevation_m": float(d.elevation_m),
                 "sigma_m": float(d.sigma_m),
+                "lock_version": d.lock_version,
             }
             for d in datums
         ],
@@ -133,12 +139,19 @@ def _serialize_project_state(project_id: int, db: Session) -> dict[str, Any]:
                 "id": r.id,
                 "name": r.name,
                 "rule": r.rule,
+                "lock_version": r.lock_version,
             }
             for r in rules
         ],
     }
-    observations_hash = canonical_sha256(payload["observations"])
-    rules_hash = canonical_sha256({"datums": payload["datums"], "weight_rules": payload["weight_rules"]})
+
+    def _strip_versions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{key: value for key, value in row.items() if key != "lock_version"} for row in rows]
+
+    observations_hash = canonical_sha256(_strip_versions(payload["observations"]))
+    rules_hash = canonical_sha256(
+        {"datums": _strip_versions(payload["datums"]), "weight_rules": _strip_versions(payload["weight_rules"])}
+    )
     payload_hash = canonical_sha256({"observations": observations_hash, "rules": rules_hash})
     summary = {
         "point_count": len(points),
@@ -198,6 +211,52 @@ def create_immutable_snapshot(db: Session, project_id: int) -> Snapshot:
     db.add(snapshot)
     db.flush()
     return snapshot
+
+
+def serialize_draft_state(db: Session, project_id: int) -> dict[str, Any]:
+    """Read-only serialized view of the current draft inputs."""
+    return _serialize_project_state(project_id, db)
+
+
+def build_draft_diff(db: Session, project_id: int, base_snapshot_id: int | None = None) -> dict[str, Any]:
+    """Compare the current draft against a snapshot without any write side effect.
+
+    Strictly read-only: creates no Snapshot/Job, bumps no lock_version, and never
+    mutates the (immutable) baseline snapshot.
+    """
+    from app.services.diffing import diff_payloads
+
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "project not found")
+
+    query = select(Snapshot).where(Snapshot.project_id == project_id)
+    if base_snapshot_id is not None:
+        snapshot = db.get(Snapshot, base_snapshot_id)
+        if snapshot is None or snapshot.project_id != project_id:
+            raise HTTPException(404, f"snapshot {base_snapshot_id} not found for project {project_id}")
+    else:
+        # Latest snapshot defaults to the last review baseline, ordered by version.
+        snapshot = db.scalar(query.order_by(Snapshot.version.desc()))
+
+    draft = _serialize_project_state(project_id, db)
+    diff = diff_payloads(snapshot.payload if snapshot is not None else None, draft["payload"])
+    diff["base_snapshot"] = (
+        None
+        if snapshot is None
+        else {
+            "id": snapshot.id,
+            "version": snapshot.version,
+            "created_at": snapshot.created_at,
+            "observations_sha256": snapshot.observations_sha256,
+            "rules_sha256": snapshot.rules_sha256,
+            "input_summary": snapshot.input_summary,
+        }
+    )
+    diff["draft_summary"] = draft["summary"]
+    diff["project"] = {"id": project_id, "code": project.code, "lock_version": project.lock_version}
+    diff["query_side_effect"] = "read_only_no_job_no_snapshot"
+    return diff
 
 
 def ensure_single_generation(db: Session, project_id: int, snapshot_id: int) -> tuple[Job, bool]:

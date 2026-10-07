@@ -96,6 +96,24 @@ curl -X PATCH http://localhost:8000/api/weight-rules/2 \
 
 版本冲突返回 HTTP 409，审计表 `audit_events` 保存前后值和版本递增链。
 
+## 快照—草稿差异复核（只读）
+
+提交新 Job 前，测量员可先复核当前草稿与上一份快照的输入差异。查询**不生成 Job、不创建新快照、不推进任何 `lock_version`，也不改变旧快照**（快照保持 `immutable=true`），连续查看结果完全一致：
+
+```bash
+# 默认对比项目的最新快照；也可用 ?base_snapshot_id= 指定基准
+curl http://localhost:8000/api/projects/1/draft-diff
+```
+
+按测点、基准、观测高差/长度（测段）和权重规则分别列出 `added` / `removed` / `modified`，每条都带稳定数字 ID、`lock_version`（草稿版本）与 `base_lock_version`（快照版本）；响应另含 `topology`（供前端高亮）、`totals` 与实时 `draft_summary`（含输入 SHA-256）。
+
+- **稳定 ID 匹配**：所有实体按数字主键 `id` 配对，绝不按 `code`/`line_code` 配对。同名但不同测点（重测后复用点号、新行新 ID）显示为一删一增，不会被误配为“改名”。
+- **只调权重**：`totals.weight_rules_only=true`、`topology_changed=false`，只有权重规则出现变化，拓扑图无任何高亮。
+- **删除桥接测段**：停用（`active=false`）的测段出现在 `topology.edges.removed`，拓扑图中以红色虚线幽灵边高亮。
+- 数值列以 Numeric 存储精度（`5e-10` m 容差）比较，低于存储精度的浮点往返噪声不报差异，真实 1 mm 编辑必报。
+
+前端点击「快照—草稿差异复核」后，拓扑图按 绿=新增 / 红=删除 / 橙=端点改动 / 橙虚线=高差长度改动 高亮，并展示变化明细与「新草稿输入摘要」。
+
 ## 任务流程
 
 ```bash

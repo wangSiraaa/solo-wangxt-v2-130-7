@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ElementDefinition } from 'cytoscape';
-import { api, type Job, type ResidualRow } from './lib/api';
+import { api, type DraftDiff, type Job, type ResidualRow } from './lib/api';
 import { NetworkGraph } from './components/NetworkGraph';
 import { StageTracker } from './components/StageTracker';
 import { ResidualTable } from './components/ResidualTable';
+import { DiffReview } from './components/DiffReview';
 import './styles.css';
 
 export default function App() {
@@ -11,12 +12,15 @@ export default function App() {
   const [elements, setElements] = useState<ElementDefinition[]>([]);
   const [job, setJob] = useState<Job | null>(null);
   const [residuals, setResiduals] = useState<ResidualRow[]>([]);
+  const [draftDiff, setDraftDiff] = useState<DraftDiff | null>(null);
+  const [reviewing, setReviewing] = useState(false);
   const [message, setMessage] = useState('');
 
   useEffect(() => {
     api<{ nodes: unknown[]; edges: unknown[] }>(`/api/projects/${projectId}/topology`)
       .then((data) => setElements([...(data.nodes as ElementDefinition[]), ...(data.edges as ElementDefinition[])]))
       .catch((error) => setMessage(error.message));
+    setDraftDiff(null);
   }, [projectId]);
 
   useEffect(() => {
@@ -29,6 +33,28 @@ export default function App() {
   }, [job]);
 
   const cyElements = useMemo(() => elements, [elements]);
+
+  async function reviewDiff() {
+    setReviewing(true);
+    try {
+      // Read-only: no Job, no snapshot, no lock_version advance on either side.
+      const result = await api<DraftDiff>(`/api/projects/${projectId}/draft-diff`);
+      setDraftDiff(result);
+      setMessage(
+        result.base_snapshot
+          ? `差异复核（快照 v${result.base_snapshot.version} → 当前草稿）：${result.totals.total} 项输入变化`
+          : '尚无快照：当前草稿输入全部为新增'
+      );
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setReviewing(false);
+    }
+  }
+
+  function clearDiff() {
+    setDraftDiff(null);
+  }
 
   async function submitSnapshot() {
     setMessage('创建不可变快照并提交唯一任务代次...');
@@ -77,6 +103,10 @@ export default function App() {
           项目 ID
           <input value={projectId} onChange={(event) => setProjectId(Number(event.target.value))} type="number" />
         </label>
+        <button onClick={reviewDiff} disabled={reviewing}>
+          {reviewing ? '复核中…' : '快照—草稿差异复核'}
+        </button>
+        {draftDiff && <button onClick={clearDiff}>清除高亮</button>}
         <button onClick={submitSnapshot}>提交当前草稿快照</button>
         <button onClick={resume} disabled={!job}>
           从确认阶段恢复
@@ -94,7 +124,15 @@ export default function App() {
       <section className="grid">
         <div className="card">
           <h2>测点拓扑 / 问题子网</h2>
-          <NetworkGraph elements={cyElements} />
+          {draftDiff?.totals.topology_changed && (
+            <p className="diff-legend">
+              <span className="legend-dot legend-added" /> 新增测段/测点
+              <span className="legend-dot legend-removed" /> 删除（含桥接测段）
+              <span className="legend-dot legend-modified" /> 端点改动
+              <span className="legend-dot legend-value" /> 高差/长度改动
+            </p>
+          )}
+          <NetworkGraph elements={cyElements} diff={draftDiff?.topology ?? null} />
         </div>
         <div className="card">
           <h2>任务阶段</h2>
@@ -121,6 +159,12 @@ export default function App() {
           )}
         </div>
       </section>
+
+      {draftDiff && (
+        <section className="card diff-card">
+          <DiffReview diff={draftDiff} />
+        </section>
+      )}
 
       {residuals.length > 0 && (
         <section className="card">

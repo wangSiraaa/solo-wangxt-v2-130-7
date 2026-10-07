@@ -1,6 +1,7 @@
 declare module 'cytoscape' {
   export interface ElementDefinition {
     data: Record<string, unknown>;
+    classes?: string[] | string;
   }
 
   export interface CoreLayoutOptions {

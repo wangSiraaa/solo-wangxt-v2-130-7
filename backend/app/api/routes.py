@@ -27,7 +27,12 @@ from app.models.schema import (
     ObservationResult,
     ComponentResult,
 )
-from app.services.snapshots import apply_optimistic_update, create_immutable_snapshot, ensure_single_generation
+from app.services.snapshots import (
+    apply_optimistic_update,
+    build_draft_diff,
+    create_immutable_snapshot,
+    ensure_single_generation,
+)
 from app.workers.tasks import build_pipeline
 
 router = APIRouter(prefix="/api")
@@ -169,6 +174,17 @@ def resume_job(job_id: int, db: Session = Depends(get_db)):
     pipeline = build_pipeline(job.id)
     pipeline.apply_async()
     return {"job_id": job.id, "current_stage": job.current_stage, "confirmed": [n for n, s in stages.items() if s.status == "confirmed"]}
+
+
+@router.get("/projects/{project_id}/draft-diff")
+def draft_diff(project_id: int, base_snapshot_id: int | None = None, db: Session = Depends(get_db)):
+    """Review draft inputs against the previous snapshot before submitting a Job.
+
+    Read-only: returns added/removed/modified inputs with lock versions and a
+    fresh draft summary. It never creates a snapshot or Job, bumps lock versions,
+    or touches the immutable baseline snapshot.
+    """
+    return build_draft_diff(db, project_id, base_snapshot_id=base_snapshot_id)
 
 
 @router.get("/projects/{project_id}/topology")
